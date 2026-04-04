@@ -1,78 +1,87 @@
-import static_ffmpeg
-static_ffmpeg.add_paths() # ይህ መስመር FFmpeg-ን በራሱ ፈልጎ ይጭነዋል
 import os
 import subprocess
 import logging
 import yt_dlp
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# ለ Logs ክትትል እንዲመች
+# Logging setup
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Token-ን ከ Environment Variable ያነባል
+# Token from Environment Variable
 TOKEN = os.getenv("BOT_TOKEN")
 
-async def process_video(input_path, output_path):
+def process_video(input_path, output_path):
     """
-    ቪዲዮውን 4K Quality (Glow + Sharpness) የሚሰጠው የ FFmpeg ትዕዛዝ
+    ቪዲዮውን ጥራት የሚጨምር እና ከለር Grading የሚሰራ FFmpeg ትዕዛዝ
+    Railway RAM እንዳይጨርስ 'ultrafast' እና '720p' ተመራጭ ነው
     """
-    prompt = (
-        "scale=1080:-2:flags=lanczos,"  # ለ Railway ፍጥነት ሲባል 1080p ተመራጭ ነው
-        "unsharp=5:5:1.5:5:5:0.0,"      # ጥራቱን በጣም ይጨምረዋል
-        "eq=saturation=1.6:contrast=1.2:brightness=0.03" # ከለሩን ያፀባርቀዋል
+    # High Quality & Glow Filter
+    filters = (
+        "scale=720:-2:flags=lanczos,"
+        "unsharp=3:3:1.0:3:3:0.0,"
+        "eq=saturation=1.5:contrast=1.1:brightness=0.02"
     )
     
     command = [
-        'ffmpeg', '-i', input_path,
-        '-vf', prompt,
-        '-c:v', 'libx264', '-crf', '18', '-preset', 'superfast', 
-        '-c:a', 'copy', output_path
+        'ffmpeg', '-y', '-i', input_path,
+        '-vf', filters,
+        '-c:v', 'libx264', 
+        '-preset', 'ultrafast', # ለፍጥነት
+        '-crf', '20',           # ለጥራት (ዝቅተኛ ቁጥር = ከፍተኛ ጥራት)
+        '-c:a', 'copy', 
+        output_path
     ]
     
-    process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if process.returncode != 0:
-        raise Exception(f"FFmpeg Error: {process.stderr.decode()}")
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        logging.error(f"FFmpeg Error: {result.stderr}")
+        return False
+    return True
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     
-    # ሊንክ መሆኑን ማረጋገጥ
-    if "tiktok.com" in url or "instagram.com" in url or "youtube.com" in url:
-        status_msg = await update.message.reply_text("🎬 ቪዲዮውን እያወረድኩ ነው...")
+    if any(site in url for site in ["tiktok.com", "instagram.com", "youtube.com", "shorts"]):
+        status_msg = await update.message.reply_text("🎬 ቪዲዮውን እያወረድኩ ነው... ⏳")
         
-        input_file = "input_video.mp4"
-        output_file = "output_high_quality.mp4"
+        input_file = f"in_{update.message.chat_id}.mp4"
+        output_file = f"out_{update.message.chat_id}.mp4"
         
         ydl_opts = {
             'outtmpl': input_file,
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'overwrites': True
+            'format': 'best[ext=mp4]/best',
+            'overwrites': True,
+            'quiet': True
         }
         
         try:
-            # 1. ማውረድ
+            # 1. Download
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
             
-            await status_msg.edit_text("✨ ጥራቱን በመጨመር ላይ ነኝ (Color Grading & Sharpening)...")
+            await status_msg.edit_text("✨ ጥራቱን በመጨመር ላይ ነኝ (4K Edit)... 🚀")
             
-            # 2. ፕሮሰስ ማድረግ
-            await process_video(input_file, output_file)
+            # 2. Process (FFmpeg)
+            # አድካሚ ስራ ስለሆነ በ thread እናስኪደው
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(None, process_video, input_file, output_file)
             
-            # 3. መላክ
-            await status_msg.edit_text("🚀 ጥራት ያለው ቪዲዮ ዝግጁ ነው! በመላክ ላይ...")
-            with open(output_file, 'rb') as video:
-                await update.message.reply_video(video=video, caption="Produced by Your 4K Bot 🔥")
-            
-            await status_msg.delete()
+            if success and os.path.exists(output_file):
+                await status_msg.edit_text("✅ ተጠናቀቀ! በመላክ ላይ...")
+                with open(output_file, 'rb') as video:
+                    await update.message.reply_video(video=video, caption="High Quality Edit By Your Bot 🔥")
+            else:
+                await update.message.reply_text("❌ ይቅርታ ቪዲዮውን ማቀነባበር አልተቻለም።")
             
         except Exception as e:
             logging.error(f"Error: {e}")
-            await update.message.reply_text(f"❌ ስህተት ተከስቷል፦ {str(e)[:100]}")
+            await update.message.reply_text(f"❌ ስህተት ተከስቷል፦ {str(e)[:50]}")
         
         finally:
-            # ፋይሎችን ማጽዳት (Railway Storage እንዳይሞላ)
+            # Cleanup
+            await status_msg.delete()
             if os.path.exists(input_file): os.remove(input_file)
             if os.path.exists(output_file): os.remove(output_file)
     else:
@@ -80,9 +89,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     if not TOKEN:
-        print("Error: BOT_TOKEN variable አልተገኘም!")
+        print("BOT_TOKEN አልተገኘም! እባክህ Railway Variables ላይ ጨምር።")
     else:
         app = ApplicationBuilder().token(TOKEN).build()
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-        print("ቦቱ ስራ ጀምሯል...")
+        print("ቦቱ ስራ ጀምሯል... ሊንክ መላክ ትችላለህ")
         app.run_polling()
