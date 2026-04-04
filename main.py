@@ -5,7 +5,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 import yt_dlp
 
 # የቦትህን Token እዚህ ጋር ተካው
-TOKEN = "YOUR_BOT_TOKEN_HERE"
+TOKEN = "8774505972:AAF2B9eClGT9_5RSuDGr8C3cqQBJk7aImdg"
 
 async def process_video(input_path, output_path):
     # ያንተ "Glow & High Quality" ፕሮምፕት
