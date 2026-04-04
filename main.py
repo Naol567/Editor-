@@ -1,3 +1,5 @@
+import static_ffmpeg
+static_ffmpeg.add_paths() # ይህ መስመር FFmpeg-ን በራሱ ፈልጎ ይጭነዋል
 import os
 import subprocess
 import logging
