@@ -8,13 +8,18 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from dotenv import load_dotenv
 
+# --- የቦቱ መነሻ ምልክት (Logs ላይ ለማየት) ---
+print("---------------------------------")
+print("🔥 ቦቱ አሁን መነሳት ጀምሯል...")
+print("---------------------------------")
+
 load_dotenv()
 
 # --- Configuration (Render Environment Variables) ---
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SESSION_STRING = os.getenv("SESSION_STRING", "") # ያወጣኸው ረጅሙ ቁልፍ
+SESSION_STRING = os.getenv("SESSION_STRING", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
 
@@ -29,7 +34,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is Running Perfectly")
 
 def run_health_server():
-    # Render የሚሰጠውን PORT በመጠቀም 'Port scan timeout'ን ያስቀራል
     port = int(os.environ.get("PORT", 8000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     print(f"📡 Health check server started on port {port}")
@@ -47,7 +51,7 @@ async def progress_bar(current, total, event, msg_prefix):
 
 # --- Video Processing (4K Glow HQ) ---
 def process_video_4k(input_path, output_path):
-    # - የጥራት ማሳደጊያ ፊልተር
+    # ከፍተኛ ጥራት ያለው 4K Glow ማጣሪያ
     filters = (
         "scale=3840:2160:flags=lanczos,unsharp=5:5:1.5:5:5:0.0,"
         "split[main][blur];[blur]boxblur=20:5[glow];"
@@ -71,8 +75,12 @@ def process_video_4k(input_path, output_path):
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
+    # ADMIN_ID በትክክል መግባቱን ለማረጋገጥ
+    print(f"📩 የገባው መልእክት ከ ID: {event.sender_id}")
     if event.sender_id == ADMIN_ID:
-        await event.respond("✅ ቦቱ ዝግጁ ነው! ቪዲዮ ስትልክልኝ በ 4K Glow Edit አድርጌ ወደ ቻናል እልካለሁ።")
+        await event.respond("✅ ሰላም ጌታዬ! ቦቱ ዝግጁ ነው። ቪዲዮ ላክልኝ።")
+    else:
+        await event.respond(f"⚠️ ይቅርታ፣ ይህ ቦት ለባለቤቱ ብቻ ነው። ያንተ ID: {event.sender_id}")
 
 @client.on(events.NewMessage(func=lambda e: e.video))
 async def handle_video(event):
@@ -82,7 +90,6 @@ async def handle_video(event):
     in_f, out_f = "input_video.mp4", "output_4k_glow.mp4"
 
     try:
-        # ማውረድ
         await client.download_media(
             event.video, in_f, 
             progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📥 በማውረድ ላይ"))
@@ -90,34 +97,30 @@ async def handle_video(event):
 
         await status.edit("🎬 4K Glow Edit እየተደረገ ነው... (ጥቂት ደቂቃ ይጠብቁ)")
         
-        # ማቀነባበር
         success = await asyncio.to_thread(process_video_4k, in_f, out_f)
 
         if success:
             await status.edit("📤 ወደ ቻናል እየተጫነ ነው...")
-            # ወደ ቻናል መላክ (ትልቅ ፋይል ይቻላል)
             channel_msg = await client.send_file(
                 CHANNEL_ID, out_f, 
                 caption="✨ 4K Ultra HQ Glow Edit", 
                 supports_streaming=True,
                 progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📤 በመጫን ላይ"))
             )
-            # ለተጠቃሚው ኮፒ መላክ
-            await client.send_message(event.chat_id, "✅ ተጠናቋል! ቪዲዮው ወደ ቻናል ተልኳል።", reply_to=channel_msg)
+            await client.send_message(event.chat_id, "✅ ተጠናቋል! ቪዲዮው ወደ ቻናል ተልኳል።")
             await status.delete()
         else:
-            await status.edit("❌ ቪዲዮውን ማቀነባበር አልተቻለም። FFmpeg መኖሩን አረጋግጥ።")
+            await status.edit("❌ ስህተት ተፈጥሯል። FFmpeg መኖሩን አረጋግጥ።")
 
     except Exception as e:
         await event.respond(f"❌ ስህተት ተፈጠረ: {e}")
 
-    # ፋይሎችን ማጽዳት
     for f in [in_f, out_f]:
         if os.path.exists(f): os.remove(f)
 
 # --- Main Run ---
 async def start_bot():
-    # Health Server ን በስተጀርባ ያስጀምራል
+    # Health Server (Render Port Fix)
     threading.Thread(target=run_health_server, daemon=True).start()
     
     # ቦቱን ያስጀምራል
