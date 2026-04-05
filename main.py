@@ -1,86 +1,100 @@
 import os
-import subprocess
-import logging
-import yt_dlp
 import asyncio
+import subprocess
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+from dotenv import load_dotenv
 
-# Logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+load_dotenv()
 
-# --- ያንተ Token ---
-TOKEN = "8721985752:AAGRKd_vhMq2K_iW5SKxcxZooxlEHWznkeQ"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID  = int(os.getenv("ADMIN_ID", 0))
 
-# Render እንዳይዘጋው የሚያደርግ ትንሿ የዌብ ሰርቨር
-class HealthCheckHandler(BaseHTTPRequestHandler):
+# --- Render Health Check ---
+class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is Running")
+        self.wfile.write(b"4K Edit Bot is Active")
 
-def run_health_check():
+def run_render_server():
     port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
+    httpd = HTTPServer(('0.0.0.0', port), HealthHandler)
+    httpd.serve_forever()
 
-def process_video(input_path, output_path):
-    # Glow, Sharpness እና Color Saturation የሚጨምር ፊልተር
+# --- 4K High Quality Glow Filter ---
+def process_video_4k(input_path, output_path):
+    """
+    ቪዲዮውን ወደ 4K የሚቀይር እና High Quality Glow የሚጨምር FFmpeg ትዕዛዝ
+    """
+    # 4K Resolution (3840x2160) እና የጥራት ማሻሻያ ፊልተሮች
     video_filters = (
-        "scale=720:-2:flags=lanczos,"
+        "scale=3840:2160:flags=lanczos," # ወደ 4K ከፍ ማድረጊያ
+        "unsharp=5:5:1.5:5:5:0.0,"       # እጅግ በጣም እንዲጠራ (Sharpen)
         "split[main][blur];"
-        "[blur]boxblur=15:3,scale=iw:ih[glow];"
-        "[main][glow]blend=all_mode='screen':all_opacity=0.35,"
-        "unsharp=5:5:1.5:5:5:0.0,"
-        "eq=saturation=1.8:contrast=1.2"
+        "[blur]boxblur=20:5[glow];"      # ለ Glow ውጤቱ ማደብዘዣ
+        "[main][glow]blend=all_mode='screen':all_opacity=0.35," # Glow መደራረቢያ
+        "eq=saturation=1.9:contrast=1.4:brightness=-0.03" # ምስሉ ላይ እንዳለው ደማቅ ቀለም
     )
+
     command = [
         'ffmpeg', '-y', '-i', input_path,
         '-vf', video_filters,
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-        '-preset', 'ultrafast', '-crf', '20',
-        '-c:a', 'copy', output_path
+        '-c:v', 'libx264', 
+        '-preset', 'ultrafast', # Render ፍጥነት እንዲኖረው
+        '-crf', '16',           # በጣም ከፍተኛ ጥራት (ዝቅተኛ ቁጥር = ከፍተኛ ጥራት)
+        '-c:a', 'copy',         # ድምፁን እንዳለ መተው
+        output_path
     ]
+    
     try:
-        subprocess.run(command, check=True, timeout=300)
+        subprocess.run(command, check=True)
         return True
-    except:
+    except Exception as e:
+        print(f"FFmpeg Error: {e}")
         return False
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
-    if any(p in url for p in ["tiktok.com", "instagram.com", "youtube.com", "shorts", "reels"]):
-        status = await update.message.reply_text("🎬 በማውረድ ላይ... ⏳")
-        input_f, output_f = f"in_{update.message.chat_id}.mp4", f"out_{update.message.chat_id}.mp4"
-        try:
-            ydl_opts = {'outtmpl': input_f, 'format': 'best', 'quiet': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                await asyncio.to_thread(ydl.download, [url])
-            
-            await status.edit_text("✨ ጥራት እና Glow እየጨመርኩ ነው... 🚀")
-            success = await asyncio.get_event_loop().run_in_executor(None, process_video, input_f, output_f)
-            
-            if success and os.path.exists(output_f):
-                await status.edit_text("✅ ተጠናቀቀ! በመላክ ላይ...")
-                with open(output_f, 'rb') as v:
-                    await update.message.reply_video(video=v, caption="🔥 Premium Quality Edit")
-            else:
-                with open(input_f, 'rb') as v:
-                    await update.message.reply_video(video=v, caption="Original Video (Edit Failed)")
-        except Exception as e:
-            await update.message.reply_text(f"❌ ስህተት፦ {str(e)[:50]}")
-        finally:
-            for f in [input_f, output_f]:
-                if os.path.exists(f): os.remove(f)
+# --- Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("ሰላም! ቪዲዮ ላክልኝና ወደ **4K Ultra HQ Glow** እቀይርልሃለሁ።")
 
-if __name__ == '__main__':
-    # የጤና ምርመራ ሰርቨሩን በሌላ Thread ማስጀመር (ለ Render)
-    Thread(target=run_health_check, daemon=True).start()
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    video = update.message.video
+    status_msg = await update.message.reply_text("🎬 የ 4K Edit ስራ ተጀምሯል... ጥራቱ ከፍተኛ ስለሆነ ጥቂት ደቂቃ ሊወስድ ይችላል።")
     
-    # ቦቱን ማስጀመር
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    print("🚀 ቦቱ በ Render ላይ ስራ ጀምሯል...")
-    app.run_polling(drop_pending_updates=True)
+    file = await context.bot.get_file(video.file_id)
+    input_file = "in.mp4"
+    output_file = "out_4k.mp4"
+    
+    await file.download_to_drive(input_file)
+    
+    # ፕሮሰስ ማድረግ
+    success = process_video_4k(input_file, output_file)
+    
+    if success:
+        # ለቴሌግራም ፋይሉ ትልቅ ሊሆን ስለሚችል እንደ ዶክመንት መላክ ይሻላል
+        await update.message.reply_document(document=open(output_file, 'rb'), caption="✅ 4K Ultra HQ Edit ተጠናቋል!")
+    else:
+        await update.message.reply_text("❌ ስህተት ተፈጥሯል። ምናልባት የቪዲዮው መጠን ከባድ ሊሆን ይችላል።")
+    
+    if os.path.exists(input_file): os.remove(input_file)
+    if os.path.exists(output_file): os.remove(output_file)
+    await status_msg.delete()
+
+async def main():
+    threading.Thread(target=run_render_server, daemon=True).start()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(main())
