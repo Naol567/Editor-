@@ -2,99 +2,131 @@ import os
 import asyncio
 import subprocess
 import threading
+import cv2
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+from telethon import TelegramClient, events
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Environment Variables
+API_ID = int(os.getenv("API_ID", 0))
+API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID  = int(os.getenv("ADMIN_ID", 0))
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
+
+client = TelegramClient('session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 # --- Render Health Check ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"4K Edit Bot is Active")
+        self.wfile.write(b"4K Pro Bot with Animation is Active")
 
 def run_render_server():
     port = int(os.environ.get("PORT", 8000))
     httpd = HTTPServer(('0.0.0.0', port), HealthHandler)
     httpd.serve_forever()
 
-# --- 4K High Quality Glow Filter ---
+# --- Live Progress & Animation ---
+async def progress_bar(current, total, event, msg_prefix):
+    percentage = current * 100 / total
+    if not hasattr(progress_bar, "last_edit"): progress_bar.last_edit = 0
+    if time.time() - progress_bar.last_edit > 5 or percentage == 100:
+        text = f"{msg_prefix}: {percentage:.1f}% ..."
+        try:
+            await event.edit(text)
+            progress_bar.last_edit = time.time()
+        except: pass
+
+async def processing_animation(event, stop_event):
+    frames = ["🎬 ቪዲዮው እየተቀነባበረ ነው .", "🎬 ቪዲዮው እየተቀነባበረ ነው ..", "🎬 ቪዲዮው እየተቀነባበረ ነው ..."]
+    i = 0
+    while not stop_event.is_set():
+        try:
+            await event.edit(frames[i % 3])
+            await asyncio.sleep(1.5)
+            i += 1
+        except: break
+
+# --- Video Processing Functions ---
+def generate_thumbnail(video_path, thumb_path):
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
+    success, image = cap.read()
+    if success: cv2.imwrite(thumb_path, image)
+    cap.release()
+
 def process_video_4k(input_path, output_path):
-    """
-    ቪዲዮውን ወደ 4K የሚቀይር እና High Quality Glow የሚጨምር FFmpeg ትዕዛዝ
-    """
-    # 4K Resolution (3840x2160) እና የጥራት ማሻሻያ ፊልተሮች
-    video_filters = (
-        "scale=3840:2160:flags=lanczos," # ወደ 4K ከፍ ማድረጊያ
-        "unsharp=5:5:1.5:5:5:0.0,"       # እጅግ በጣም እንዲጠራ (Sharpen)
-        "split[main][blur];"
-        "[blur]boxblur=20:5[glow];"      # ለ Glow ውጤቱ ማደብዘዣ
-        "[main][glow]blend=all_mode='screen':all_opacity=0.35," # Glow መደራረቢያ
-        "eq=saturation=1.9:contrast=1.4:brightness=-0.03" # ምስሉ ላይ እንዳለው ደማቅ ቀለም
+    filters = (
+        "scale=3840:2160:flags=lanczos,unsharp=5:5:1.5:5:5:0.0,"
+        "split[main][blur];[blur]boxblur=20:5[glow];"
+        "[main][glow]blend=all_mode='screen':all_opacity=0.35,"
+        "eq=saturation=1.9:contrast=1.4:brightness=-0.02"
     )
-
-    command = [
-        'ffmpeg', '-y', '-i', input_path,
-        '-vf', video_filters,
-        '-c:v', 'libx264', 
-        '-preset', 'ultrafast', # Render ፍጥነት እንዲኖረው
-        '-crf', '16',           # በጣም ከፍተኛ ጥራት (ዝቅተኛ ቁጥር = ከፍተኛ ጥራት)
-        '-c:a', 'copy',         # ድምፁን እንዳለ መተው
-        output_path
-    ]
-    
+    cmd = ['ffmpeg', '-y', '-i', input_path, '-vf', filters, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-c:a', 'copy', output_path]
     try:
-        subprocess.run(command, check=True)
+        subprocess.run(cmd, check=True)
         return True
-    except Exception as e:
-        print(f"FFmpeg Error: {e}")
-        return False
+    except: return False
 
-# --- Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ሰላም! ቪዲዮ ላክልኝና ወደ **4K Ultra HQ Glow** እቀይርልሃለሁ።")
+# --- Bot Events ---
+@client.on(events.NewMessage(pattern='/start'))
+async def start(event):
+    await event.respond("ሰላም! ቪዲዮ ላክልኝና በ 4K Ultra HQ Glow አቀነባብሬ እልክልሃለሁ።")
 
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+@client.on(events.NewMessage)
+async def handle_video(event):
+    if event.sender_id != ADMIN_ID or not event.video:
         return
 
-    video = update.message.video
-    status_msg = await update.message.reply_text("🎬 የ 4K Edit ስራ ተጀምሯል... ጥራቱ ከፍተኛ ስለሆነ ጥቂት ደቂቃ ሊወስድ ይችላል።")
+    status = await event.respond("📥 በማውረድ ላይ: 0%")
+    input_file, output_file, thumb_file = "in.mp4", "out_4k.mp4", "thumb.jpg"
+
+    # 1. Download with Progress
+    await client.download_media(
+        event.video, input_file,
+        progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📥 በማውረድ ላይ"))
+    )
+
+    # 2. Processing with Animation
+    stop_anim = asyncio.Event()
+    anim_task = client.loop.create_task(processing_animation(status, stop_anim))
     
-    file = await context.bot.get_file(video.file_id)
-    input_file = "in.mp4"
-    output_file = "out_4k.mp4"
+    # FFmpeg ስራውን እስኪጨርስ በሌላ thread ማስኬድ
+    success = await asyncio.to_thread(process_video_4k, input_file, output_file)
     
-    await file.download_to_drive(input_file)
-    
-    # ፕሮሰስ ማድረግ
-    success = process_video_4k(input_file, output_file)
-    
+    stop_anim.set()
+    await anim_task
+
     if success:
-        # ለቴሌግራም ፋይሉ ትልቅ ሊሆን ስለሚችል እንደ ዶክመንት መላክ ይሻላል
-        await update.message.reply_document(document=open(output_file, 'rb'), caption="✅ 4K Ultra HQ Edit ተጠናቋል!")
+        generate_thumbnail(output_file, thumb_file)
+        await status.edit("📤 በመጫን ላይ: 0%")
+        
+        # 3. Upload to Channel
+        channel_msg = await client.send_file(
+            CHANNEL_ID, output_file, thumb=thumb_file,
+            caption="✨ 4K Ultra HQ Glow Edit",
+            supports_streaming=True,
+            progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📤 በመጫን ላይ"))
+        )
+
+        # 4. Copy to User (No Channel Name)
+        await client.send_message(event.chat_id, channel_msg)
+        await status.delete()
     else:
-        await update.message.reply_text("❌ ስህተት ተፈጥሯል። ምናልባት የቪዲዮው መጠን ከባድ ሊሆን ይችላል።")
-    
-    if os.path.exists(input_file): os.remove(input_file)
-    if os.path.exists(output_file): os.remove(output_file)
-    await status_msg.delete()
+        await status.edit("❌ ስህተት ተፈጥሯል። Render RAM መጠኑ አናሳ ሊሆን ይችላል።")
+
+    for f in [input_file, output_file, thumb_file]:
+        if os.path.exists(f): os.remove(f)
 
 async def main():
     threading.Thread(target=run_render_server, daemon=True).start()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    await asyncio.Event().wait()
+    print("🚀 ቦቱ በሙሉ አቅሙ ስራ ጀምሯል...")
+    await client.run_until_disconnected()
 
 if __name__ == "__main__":
     asyncio.run(main())
