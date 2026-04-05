@@ -6,6 +6,7 @@ import cv2
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,30 +16,28 @@ API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0)) # በቁጥር መሆን አለበት (ለምሳሌ -100...)
 
-client = TelegramClient('session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# Client በ 'session' ፋይል አማካኝነት ስልክህንም ቦቱንም በአንድ ላይ ያስኬዳል
+client = TelegramClient('session', API_ID, API_HASH)
 
 # --- Render Health Check ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"4K Pro Bot with Animation is Active")
+        self.send_response(200); self.end_headers()
+        self.wfile.write(b"4K Pro Bot with Login is Active")
 
 def run_render_server():
     port = int(os.environ.get("PORT", 8000))
-    httpd = HTTPServer(('0.0.0.0', port), HealthHandler)
-    httpd.serve_forever()
+    HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
 
-# --- Live Progress & Animation ---
+# --- Helpers: Progress, Animation, Thumbnail ---
 async def progress_bar(current, total, event, msg_prefix):
     percentage = current * 100 / total
     if not hasattr(progress_bar, "last_edit"): progress_bar.last_edit = 0
     if time.time() - progress_bar.last_edit > 5 or percentage == 100:
-        text = f"{msg_prefix}: {percentage:.1f}% ..."
         try:
-            await event.edit(text)
+            await event.edit(f"{msg_prefix}: {percentage:.1f}% ...")
             progress_bar.last_edit = time.time()
         except: pass
 
@@ -47,12 +46,9 @@ async def processing_animation(event, stop_event):
     i = 0
     while not stop_event.is_set():
         try:
-            await event.edit(frames[i % 3])
-            await asyncio.sleep(1.5)
-            i += 1
+            await event.edit(frames[i % 3]); await asyncio.sleep(1.5); i += 1
         except: break
 
-# --- Video Processing Functions ---
 def generate_thumbnail(video_path, thumb_path):
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
@@ -68,64 +64,64 @@ def process_video_4k(input_path, output_path):
         "eq=saturation=1.9:contrast=1.4:brightness=-0.02"
     )
     cmd = ['ffmpeg', '-y', '-i', input_path, '-vf', filters, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-c:a', 'copy', output_path]
-    try:
-        subprocess.run(cmd, check=True)
-        return True
-    except: return False
+    return subprocess.run(cmd, check=True).returncode == 0
 
-# --- Bot Events ---
-@client.on(events.NewMessage(pattern='/start'))
-async def start(event):
-    await event.respond("ሰላም! ቪዲዮ ላክልኝና በ 4K Ultra HQ Glow አቀነባብሬ እልክልሃለሁ።")
+# --- Handlers ---
+
+@client.on(events.NewMessage(pattern='/login'))
+async def login_start(event):
+    if event.sender_id != ADMIN_ID: return
+    await event.respond("📱 እባክህ ስልክ ቁጥርህን በ +251... መልክ ላክልኝ።")
+
+@client.on(events.NewMessage(func=lambda e: e.text.startswith('+') and e.sender_id == ADMIN_ID))
+async def handle_phone(event):
+    phone = event.text.strip()
+    await client.send_code_request(phone)
+    await event.respond("📩 የ 5 ድጅት ኮድ (OTP) ተልኮልሃል። እባክህ ኮዱን ብቻ ላክልኝ።")
+
+@client.on(events.NewMessage(func=lambda e: e.text.isdigit() and len(e.text) == 5 and e.sender_id == ADMIN_ID))
+async def handle_otp(event):
+    try:
+        await client.sign_in(code=event.text)
+        await event.respond("✅ በትክክል ገብተሃል! አሁን ትላልቅ ቪዲዮዎችን መስራት ትችላለህ።")
+    except Exception as e:
+        await event.respond(f"❌ ስህተት: {e}")
 
 @client.on(events.NewMessage)
 async def handle_video(event):
-    if event.sender_id != ADMIN_ID or not event.video:
+    if event.sender_id != ADMIN_ID or not event.video: return
+    if not await client.is_user_authorized():
+        await event.respond("❌ መጀመሪያ /login በማለት ስልክህን አስገባ።")
         return
 
     status = await event.respond("📥 በማውረድ ላይ: 0%")
-    input_file, output_file, thumb_file = "in.mp4", "out_4k.mp4", "thumb.jpg"
+    in_f, out_f, thumb_f = "in.mp4", "out_4k.mp4", "thumb.jpg"
 
-    # 1. Download with Progress
-    await client.download_media(
-        event.video, input_file,
-        progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📥 በማውረድ ላይ"))
-    )
+    await client.download_media(event.video, in_f, progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📥 በማውረድ ላይ")))
 
-    # 2. Processing with Animation
     stop_anim = asyncio.Event()
     anim_task = client.loop.create_task(processing_animation(status, stop_anim))
-    
-    # FFmpeg ስራውን እስኪጨርስ በሌላ thread ማስኬድ
-    success = await asyncio.to_thread(process_video_4k, input_file, output_file)
-    
-    stop_anim.set()
-    await anim_task
+    success = await asyncio.to_thread(process_video_4k, in_f, out_f)
+    stop_anim.set(); await anim_task
 
     if success:
-        generate_thumbnail(output_file, thumb_file)
+        generate_thumbnail(out_f, thumb_f)
         await status.edit("📤 በመጫን ላይ: 0%")
-        
-        # 3. Upload to Channel
-        channel_msg = await client.send_file(
-            CHANNEL_ID, output_file, thumb=thumb_file,
-            caption="✨ 4K Ultra HQ Glow Edit",
-            supports_streaming=True,
-            progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📤 በመጫን ላይ"))
-        )
-
-        # 4. Copy to User (No Channel Name)
+        # ወደ ቻናል መጫን
+        channel_msg = await client.send_file(CHANNEL_ID, out_f, thumb=thumb_f, caption="✨ 4K Ultra HQ Glow Edit", supports_streaming=True, progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📤 በመጫን ላይ")))
+        # ለተጠቃሚው ኮፒ መላክ
         await client.send_message(event.chat_id, channel_msg)
         await status.delete()
     else:
-        await status.edit("❌ ስህተት ተፈጥሯል። Render RAM መጠኑ አናሳ ሊሆን ይችላል።")
+        await status.edit("❌ ስህተት ተፈጥሯል።")
 
-    for f in [input_file, output_file, thumb_file]:
+    for f in [in_f, out_f, thumb_f]: 
         if os.path.exists(f): os.remove(f)
 
 async def main():
     threading.Thread(target=run_render_server, daemon=True).start()
-    print("🚀 ቦቱ በሙሉ አቅሙ ስራ ጀምሯል...")
+    await client.start(bot_token=BOT_TOKEN)
+    print("🚀 ቦቱ ስራ ጀምሯል...")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
