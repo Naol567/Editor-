@@ -6,26 +6,29 @@ import cv2
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Environment Variables
-API_ID = int(os.getenv("API_ID", 0))
+# API_ID ን ወደ Integer መቀየር ወሳኝ ነው
+try:
+    API_ID = int(os.getenv("API_ID", 0))
+except:
+    API_ID = 0
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
 
-# 'session' ፋይል Login መረጃህን እንዲይዝ ያደርጋል
 client = TelegramClient('session', API_ID, API_HASH)
 
 # --- Render Health Check ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        self.wfile.write(b"4K Pro Bot with 2FA is Active")
+        self.wfile.write(b"Bot is Running")
 
 def run_render_server():
     port = int(os.environ.get("PORT", 8000))
@@ -41,22 +44,8 @@ async def progress_bar(current, total, event, msg_prefix):
             progress_bar.last_edit = time.time()
         except: pass
 
-async def processing_animation(event, stop_event):
-    frames = ["🎬 ቪዲዮው እየተቀነባበረ ነው .", "🎬 ቪዲዮው እየተቀነባበረ ነው ..", "🎬 ቪዲዮው እየተቀነባበረ ነው ..."]
-    i = 0
-    while not stop_event.is_set():
-        try:
-            await event.edit(frames[i % 3]); await asyncio.sleep(1.5); i += 1
-        except: break
-
-def generate_thumbnail(video_path, thumb_path):
-    cap = cv2.VideoCapture(video_path)
-    cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
-    success, image = cap.read()
-    if success: cv2.imwrite(thumb_path, image)
-    cap.release()
-
 def process_video_4k(input_path, output_path):
+    # - High Quality Filter
     filters = (
         "scale=3840:2160:flags=lanczos,unsharp=5:5:1.5:5:5:0.0,"
         "split[main][blur];[blur]boxblur=20:5[glow];"
@@ -64,79 +53,79 @@ def process_video_4k(input_path, output_path):
         "eq=saturation=1.9:contrast=1.4:brightness=-0.02"
     )
     cmd = ['ffmpeg', '-y', '-i', input_path, '-vf', filters, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-c:a', 'copy', output_path]
-    try:
-        subprocess.run(cmd, check=True)
-        return True
-    except: return False
+    return subprocess.run(cmd, check=True).returncode == 0
 
-# --- Login & OTP Handlers ---
+# --- Login & Step-by-Step Handling ---
 
 @client.on(events.NewMessage(pattern='/login'))
 async def login_start(event):
     if event.sender_id != ADMIN_ID: return
-    await event.respond("📱 እባክህ ስልክ ቁጥርህን በ +251... መልክ ላክልኝ።")
+    await event.respond("📱 እባክህ ስልክ ቁጥርህን በ **+251...** መልክ ላክልኝ። (ለምሳሌ፡ +251912345678)")
 
 @client.on(events.NewMessage(func=lambda e: e.sender_id == ADMIN_ID))
-async def handle_login(event):
+async def handle_all_steps(event):
+    # 1. ስልክ ቁጥር ከሆነ
     if event.text.startswith('+'):
         phone = event.text.strip()
-        await client.send_code_request(phone)
-        await event.respond("📩 የ 5 ድጅት ኮድ (OTP) ተልኮልሃል። እባክህ ኮዱን ብቻ ላክልኝ።")
-    
+        try:
+            await client.send_code_request(phone)
+            await event.respond("📩 የ 5 ድጅት ኮድ (OTP) ተልኮልሃል። እባክህ ኮዱን ብቻ ላክልኝ።")
+        except FloodWaitError as e:
+            await event.respond(f"⏳ ብዙ ሙከራ አድርገሃል። እባክህ ለ {e.seconds} ሰከንዶች ጠብቅ።")
+        except Exception as e:
+            await event.respond(f"❌ ስህተት (API ID/Hash አረጋግጥ): {e}")
+
+    # 2. OTP ኮድ ከሆነ (5 ድጅት ቁጥር)
     elif event.text.isdigit() and len(event.text) == 5:
         try:
             await client.sign_in(code=event.text)
-            await event.respond("✅ በትክክል ገብተሃል!")
+            await event.respond("✅ በትክክል ገብተሃል! አሁን ቪዲዮ መላክ ትችላለህ።")
         except SessionPasswordNeededError:
             await event.respond("🔐 አካውንትህ 2FA (Two-Factor) አለው። እባክህ ፓስወርድህን ላክልኝ።")
         except Exception as e:
-            await event.respond(f"❌ ስህተት: {e}")
+            await event.respond(f"❌ የኮድ ስህተት: {e}")
 
+    # 3. 2FA ፓስወርድ ከሆነ
     elif not event.text.startswith('/') and not event.video:
-        # ይህ ክፍል 2FA ፓስወርድን ለመቀበል ነው
         try:
             await client.sign_in(password=event.text)
             await event.respond("✅ በፓስወርድህ በትክክል ገብተሃል!")
-        except Exception as e:
-            await event.respond(f"❌ የመግቢያ ስህተት: {e}")
+        except:
+            pass # ሌሎች ሜሴጆችን ችላ እንዲል
 
-# --- Video Processing Handler ---
-
-@client.on(events.NewMessage)
+# --- Video Processing ---
+@client.on(events.NewMessage(func=lambda e: e.video))
 async def handle_video(event):
-    if event.sender_id != ADMIN_ID or not event.video: return
+    if event.sender_id != ADMIN_ID: return
     if not await client.is_user_authorized():
-        await event.respond("❌ መጀመሪያ /login በማለት ስልክህንና ኮድህን አስገባ።")
+        await event.respond("❌ መጀመሪያ /login በማለት ስልክህን አስገባ።")
         return
 
-    status = await event.respond("📥 ቪዲዮውን በማውረድ ላይ: 0%")
-    in_f, out_f, thumb_f = "in.mp4", "out_4k.mp4", "thumb.jpg"
+    status = await event.respond("📥 በማውረድ ላይ...")
+    in_f, out_f = "in.mp4", "out_4k.mp4"
 
     await client.download_media(event.video, in_f, progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📥 በማውረድ ላይ")))
-
-    stop_anim = asyncio.Event()
-    anim_task = client.loop.create_task(processing_animation(status, stop_anim))
+    
+    await status.edit("🎬 ቪዲዮው እየተቀነባበረ ነው (4K Glow)...")
     success = await asyncio.to_thread(process_video_4k, in_f, out_f)
-    stop_anim.set(); await anim_task
 
     if success:
-        generate_thumbnail(out_f, thumb_f)
-        await status.edit("📤 ቪዲዮው ወደ ቻናል እየተጫነ ነው: 0%")
-        # ወደ ቻናል መጫን
-        channel_msg = await client.send_file(CHANNEL_ID, out_f, thumb=thumb_f, caption="✨ 4K Ultra HQ Glow Edit", supports_streaming=True, progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📤 በመጫን ላይ")))
-        # ለተጠቃሚው ኮፒ መላክ (የቻናሉ ስም ሳይታይ)
+        await status.edit("📤 ወደ ቻናል እየተጫነ ነው...")
+        # - ወደ ቻናል መላክ
+        channel_msg = await client.send_file(CHANNEL_ID, out_f, caption="✨ 4K Edit", supports_streaming=True)
         await client.send_message(event.chat_id, channel_msg)
         await status.delete()
     else:
-        await status.edit("❌ ስህተት ተፈጥሯል። ምናልባት ቪዲዮው ከባድ ሊሆን ይችላል።")
+        await status.edit("❌ ስህተት ተፈጥሯል።")
 
-    for f in [in_f, out_f, thumb_f]: 
+    for f in [in_f, out_f]:
         if os.path.exists(f): os.remove(f)
 
 async def main():
     threading.Thread(target=run_render_server, daemon=True).start()
+    # መጀመሪያ በቦት ቶክን ይጀምራል
     await client.start(bot_token=BOT_TOKEN)
-    print("🚀 ቦቱ ስራ ጀምሯል...")
+    print("🚀 ቦቱ ተነስቷል!")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
