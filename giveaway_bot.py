@@ -120,7 +120,7 @@ async def notify_admin(context: ContextTypes.DEFAULT_TYPE, user_id, username, fu
         f"📛 Username: @{username if username else 'None'}\n"
         f"🔢 Count: `{current_count}` of `{max_limit}`\n"
         f"📅 Registered at: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
-        f"💰 This participant has won the $100 giveaway."
+        f"💰 This participant confirmed."
     )
     try:
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="Markdown")
