@@ -1,132 +1,179 @@
 import os
-import asyncio
-import subprocess
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from telethon import TelegramClient, events
-from telethon.sessions import StringSession
-from dotenv import load_dotenv
+import sqlite3
+import logging
+from datetime import datetime
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# --- የቦቱ መነሻ ምልክት (Logs ላይ ለማየት) ---
-print("---------------------------------")
-print("🔥 ቦቱ አሁን መነሳት ጀምሯል...")
-print("---------------------------------")
+# ================== ቅንብሮች ==================
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # የአድሚኑ የቴሌግራም መታወቂያ (user id)
+MAX_PARTICIPANTS = 5
 
-load_dotenv()
+# ሎግ ማቀናበር
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- Configuration (Render Environment Variables) ---
-API_ID = int(os.getenv("API_ID", 0))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SESSION_STRING = os.getenv("SESSION_STRING", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
-
-# በ StringSession አማካኝነት በቀጥታ ይገባል
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-
-# --- Render Port Fix (Health Check Server) ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is Running Perfectly")
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    print(f"📡 Health check server started on port {port}")
-    server.serve_forever()
-
-# --- Progress Bar Helper ---
-async def progress_bar(current, total, event, msg_prefix):
-    percentage = current * 100 / total
-    if not hasattr(progress_bar, "last_edit"): progress_bar.last_edit = 0
-    if time.time() - progress_bar.last_edit > 5 or percentage == 100:
-        try:
-            await event.edit(f"{msg_prefix}: {percentage:.1f}% ...")
-            progress_bar.last_edit = time.time()
-        except: pass
-
-# --- Video Processing (4K Glow HQ) ---
-def process_video_4k(input_path, output_path):
-    # ከፍተኛ ጥራት ያለው 4K Glow ማጣሪያ
-    filters = (
-        "scale=3840:2160:flags=lanczos,unsharp=5:5:1.5:5:5:0.0,"
-        "split[main][blur];[blur]boxblur=20:5[glow];"
-        "[main][glow]blend=all_mode='screen':all_opacity=0.35,"
-        "eq=saturation=1.9:contrast=1.4:brightness=-0.02"
-    )
-    cmd = [
-        'ffmpeg', '-y', '-i', input_path, 
-        '-vf', filters, 
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', 
-        '-c:a', 'copy', output_path
-    ]
-    try:
-        subprocess.run(cmd, check=True)
-        return True
-    except Exception as e:
-        print(f"FFmpeg Error: {e}")
-        return False
-
-# --- Handlers ---
-
-@client.on(events.NewMessage(pattern='/start'))
-async def start(event):
-    # ADMIN_ID በትክክል መግባቱን ለማረጋገጥ
-    print(f"📩 የገባው መልእክት ከ ID: {event.sender_id}")
-    if event.sender_id == ADMIN_ID:
-        await event.respond("✅ ሰላም ጌታዬ! ቦቱ ዝግጁ ነው። ቪዲዮ ላክልኝ።")
-    else:
-        await event.respond(f"⚠️ ይቅርታ፣ ይህ ቦት ለባለቤቱ ብቻ ነው። ያንተ ID: {event.sender_id}")
-
-@client.on(events.NewMessage(func=lambda e: e.video))
-async def handle_video(event):
-    if event.sender_id != ADMIN_ID: return
-
-    status = await event.respond("📥 ቪዲዮው እየወረደ ነው...")
-    in_f, out_f = "input_video.mp4", "output_4k_glow.mp4"
-
-    try:
-        await client.download_media(
-            event.video, in_f, 
-            progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📥 በማውረድ ላይ"))
+# ================== የውሂብ ጎታ ማቀናበር ==================
+def init_db():
+    conn = sqlite3.connect("giveaway.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS participants (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            registered_at TIMESTAMP
         )
+    """)
+    c.execute("CREATE TABLE IF NOT EXISTS bot_state (key TEXT PRIMARY KEY, value TEXT)")
+    c.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('participant_count', '0')")
+    conn.commit()
+    conn.close()
 
-        await status.edit("🎬 4K Glow Edit እየተደረገ ነው... (ጥቂት ደቂቃ ይጠብቁ)")
-        
-        success = await asyncio.to_thread(process_video_4k, in_f, out_f)
+def get_participant_count():
+    conn = sqlite3.connect("giveaway.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_state WHERE key = 'participant_count'")
+    count = int(c.fetchone()[0])
+    conn.close()
+    return count
 
-        if success:
-            await status.edit("📤 ወደ ቻናል እየተጫነ ነው...")
-            channel_msg = await client.send_file(
-                CHANNEL_ID, out_f, 
-                caption="✨ 4K Ultra HQ Glow Edit", 
-                supports_streaming=True,
-                progress_callback=lambda c, t: client.loop.create_task(progress_bar(c, t, status, "📤 በመጫን ላይ"))
-            )
-            await client.send_message(event.chat_id, "✅ ተጠናቋል! ቪዲዮው ወደ ቻናል ተልኳል።")
-            await status.delete()
-        else:
-            await status.edit("❌ ስህተት ተፈጥሯል። FFmpeg መኖሩን አረጋግጥ።")
+def increment_participant_count():
+    conn = sqlite3.connect("giveaway.db")
+    c = conn.cursor()
+    c.execute("UPDATE bot_state SET value = value + 1 WHERE key = 'participant_count'")
+    conn.commit()
+    conn.close()
 
+def is_already_registered(user_id):
+    conn = sqlite3.connect("giveaway.db")
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM participants WHERE user_id = ?", (user_id,))
+    exists = c.fetchone() is not None
+    conn.close()
+    return exists
+
+def register_user(user_id, username, full_name):
+    conn = sqlite3.connect("giveaway.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO participants (user_id, username, full_name, registered_at) VALUES (?, ?, ?, ?)",
+              (user_id, username, full_name, datetime.now()))
+    conn.commit()
+    conn.close()
+    increment_participant_count()
+
+def get_all_participants():
+    conn = sqlite3.connect("giveaway.db")
+    c = conn.cursor()
+    c.execute("SELECT user_id, username, full_name, registered_at FROM participants ORDER BY registered_at")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+# ================== ለአድሚን መልእክት መላኪያ ==================
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, user_id, username, full_name, current_count):
+    if not ADMIN_CHAT_ID:
+        logger.warning("ADMIN_CHAT_ID አልተዋቀረም! ማሳወቂያ አልተላከም።")
+        return
+    message = (
+        f"🎉 **አዲስ ተሳታፊ ተመዝግቧል!**\n\n"
+        f"👤 ሙሉ ስም: {full_name}\n"
+        f"🆔 የተጠቃሚ መታወቂያ: `{user_id}`\n"
+        f"📛 የተጠቃሚ ስም: @{username if username else 'የለም'}\n"
+        f"🔢 ተራ ቁጥር: {current_count}/{MAX_PARTICIPANTS}\n"
+        f"📅 የተመዘገበበት ጊዜ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="Markdown")
+        logger.info(f"አድሚን ለ {user_id} መመዝገብ ታውቋል")
     except Exception as e:
-        await event.respond(f"❌ ስህተት ተፈጠረ: {e}")
+        logger.error(f"አድሚን ማሳወቅ አልተቻለም: {e}")
 
-    for f in [in_f, out_f]:
-        if os.path.exists(f): os.remove(f)
+# ================== የቦት ትዕዛዞች ==================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username or ""
+    full_name = update.effective_user.full_name
 
-# --- Main Run ---
-async def start_bot():
-    # Health Server (Render Port Fix)
-    threading.Thread(target=run_health_server, daemon=True).start()
-    
-    # ቦቱን ያስጀምራል
-    await client.start(bot_token=BOT_TOKEN)
-    print("🚀 ቦቱ በትክክል ተነስቷል!")
-    await client.run_until_disconnected()
+    # 1. ተጠቃሚው ቀድሞ ተመዝግቧል?
+    if is_already_registered(user_id):
+        await update.message.reply_text("✅ ቀድመው በሽልማቱ ውድድር ተመዝግበዋል! መልካም እድል ይሁንልዎት።")
+        return
+
+    # 2. ሽልማቱ አልቋል? (5 ሰዎች)
+    current_count = get_participant_count()
+    if current_count >= MAX_PARTICIPANTS:
+        await update.message.reply_text("⚠️ እንደ አለመታደል ሆኖ 100$ ሽልማቱ አልቋል! ደንበኛ በመሆን ለቀጣይ ዝግጅታችን ይጠብቁን።")
+        return
+
+    # 3. የPrivate Channel አባልነት ማረጋገጥ
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        if chat_member.status in ["member", "administrator", "creator"]:
+            # ተመዝግብ!
+            register_user(user_id, username, full_name)
+            new_count = get_participant_count()
+            await update.message.reply_text(
+                f"🎉 እንኳን ደስ አለዎት! በቻናላችን ውስጥ በመገኘትዎ 100$ ሽልማት አግኝተዋል!\n"
+                f"✅ ተመዝግበዋል - {new_count}/{MAX_PARTICIPANTS}"
+            )
+            # ✨ ለአድሚን ማሳወቅ
+            await notify_admin(context, user_id, username, full_name, new_count)
+        else:
+            await update.message.reply_text("❌ fail! እባክዎ በመጀመሪያ ቻናላችንን ይቀላቀሉና ከዚያ /start ይጫኑ።")
+    except Exception as e:
+        logger.error(f"Error checking membership for {user_id}: {e}")
+        await update.message.reply_text("❌ ቴክኒካል ችግር አጋጥሟል። እባክዎ ቆይተው ይሞክሩ።")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    count = get_participant_count()
+    remaining = MAX_PARTICIPANTS - count
+    await update.message.reply_text(
+        f"📊 የሽልማት ሁኔታ\n"
+        f"👥 ተመዝጋቢዎች፦ {count}/{MAX_PARTICIPANTS}\n"
+        f"✨ የቀረ፦ {remaining}"
+    )
+
+async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ይህን ትዕዛዝ ማየት የሚችለው አድሚኑ ብቻ ነው
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ ይህ ትዕዛዝ ለአድሚኑ ብቻ ነው።")
+        return
+
+    participants = get_all_participants()
+    if not participants:
+        await update.message.reply_text("📭 እስካሁን ምንም ተመዝጋቢ የለም።")
+        return
+
+    message = "📋 **የተመዘገቡ ተሳታፊዎች**\n\n"
+    for idx, (uid, uname, fname, reg_time) in enumerate(participants, 1):
+        reg_time_str = reg_time.split('.')[0]  # ሚሊሰከንዶችን አስወግድ
+        message += (
+            f"{idx}. **{fname}**\n"
+            f"   🆔 `{uid}`\n"
+            f"   📛 @{uname if uname else 'የለም'}\n"
+            f"   🕒 {reg_time_str}\n\n"
+        )
+    # መልእክቱ በጣም ረጅም ከሆነ በርካታ ክፍሎች ማድረግ ያስፈልጋል (ግን 5 ብቻ ስለሆነ ይህ በቂ ነው)
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+# ================== ቦቱን ማስነሳት ==================
+def main():
+    if not TOKEN or not CHANNEL_ID:
+        logger.error("TELEGRAM_BOT_TOKEN ወይም CHANNEL_ID አልተዋቀረም!")
+        return
+    if not ADMIN_CHAT_ID:
+        logger.warning("ADMIN_CHAT_ID አልተዋቀረም - ለአድሚን ማሳወቂያ አይላክም።")
+
+    init_db()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("list", list_participants))  # አዲስ
+    logger.info("Bot is polling...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(start_bot())
+    main()
