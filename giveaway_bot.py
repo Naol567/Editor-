@@ -5,26 +5,26 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ================== ቅንብሮች (ከ Railway Variables) ==================
+# ================== CONFIGURATION (from Railway Variables) ==================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID_INPUT = os.getenv("CHANNEL_ID")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # የአስተዳዳሪው የተጠቃሚ መታወቂያ
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # Admin's Telegram user ID
 
-# የቻናል መታወቂያ አስተካክል
+# Normalize channel ID
 CHANNEL_ID = CHANNEL_ID_INPUT.strip()
 if CHANNEL_ID.isdigit():
     CHANNEL_ID = int(CHANNEL_ID)
 elif CHANNEL_ID.startswith('-') and CHANNEL_ID[1:].isdigit():
     CHANNEL_ID = int(CHANNEL_ID)
 
-# ሎግ ማቀናበር
+# Logging setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ================== የውሂብ ጎታ ተግባራት ==================
+# ================== DATABASE FUNCTIONS ==================
 def init_db():
     conn = sqlite3.connect("giveaway.db")
     c = conn.cursor()
@@ -101,7 +101,6 @@ def get_all_participants():
     return rows
 
 def reset_participants():
-    """ሁሉንም ተሳታፊዎች ለማጥፋት (አስተዳዳሪ ብቻ)"""
     conn = sqlite3.connect("giveaway.db")
     c = conn.cursor()
     c.execute("DELETE FROM participants")
@@ -110,19 +109,18 @@ def reset_participants():
     conn.close()
     logger.info("All participants have been reset.")
 
-# ================== ለአስተዳዳሪ ማሳወቂያ ==================
+# ================== ADMIN NOTIFICATION ==================
 async def notify_admin(context: ContextTypes.DEFAULT_TYPE, user_id, username, full_name, current_count, max_limit):
-    """አዲስ ተሳታፊ ሲመዘገብ ለአስተዳዳሪ ማሳወቂያ ይላካል (ሽልማቱን ጨምሮ)"""
     if not ADMIN_CHAT_ID:
         return
     message = (
-        f"🆕 **አዲስ ተሳታፊ ተመዝግቧል**\n\n"
-        f"👤 ሙሉ ስም: `{full_name}`\n"
-        f"🆔 የተጠቃሚ መታወቂያ: `{user_id}`\n"
-        f"📛 የተጠቃሚ ስም: @{username if username else 'የለም'}\n"
-        f"🔢 ተራ ቁጥር: `{current_count}` ከ `{max_limit}`\n"
-        f"📅 የተመዘገበበት ጊዜ: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
-        f"💰 confirmed ።"
+        f"🆕 **New participant registered**\n\n"
+        f"👤 Full name: `{full_name}`\n"
+        f"🆔 User ID: `{user_id}`\n"
+        f"📛 Username: @{username if username else 'None'}\n"
+        f"🔢 Count: `{current_count}` of `{max_limit}`\n"
+        f"📅 Registered at: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
+        f"💰 This participant has won the $100 giveaway."
     )
     try:
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="Markdown")
@@ -130,104 +128,95 @@ async def notify_admin(context: ContextTypes.DEFAULT_TYPE, user_id, username, fu
     except Exception as e:
         logger.error(f"Failed to notify admin: {e}")
 
-# ================== የቦት ትዕዛዞች ==================
+# ================== BOT COMMANDS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
     full_name = update.effective_user.full_name
 
-    # ቀድሞ ተመዝግቧል?
     if is_already_registered(user_id):
         await update.message.reply_text(
-            "ℹ️ ቀድመው በዚህ ፕሮግራም ተመዝግበዋል።\n"
-            "ለተጨማሪ መረጃ እባክዎ ድጋፍ ያግኙ።"
+            "ℹ️ You have already registered for this program.\n"
+            "For more information, please contact support."
         )
         return
 
-    # ገደቡ አልቋል?
     max_limit = get_max_limit()
     current_count = get_participant_count()
     if current_count >= max_limit:
         await update.message.reply_text(
-            "📭 እንደ አለመታደል ሆኖ በአሁኑ ጊዜ የተሳትፎ ቦታዎች አልቀዋል።\n"
-            "ለቀጣይ ዝግጅቶቻችን እባክዎ ይጠብቁን።"
+            "📭 Unfortunately, all participation slots are now full.\n"
+            "Please stay tuned for future opportunities."
         )
         return
 
-    # የPrivate Channel አባልነት ማረጋገጥ
     try:
-        await update.message.reply_text("🔍 እባክዎ ይጠብቁ፣ መረጃዎ እየተረጋገጠ ነው...")
+        await update.message.reply_text("🔍 Please wait, verifying your information...")
         chat_member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         if chat_member.status in ["member", "administrator", "creator"]:
-            # ተመዝግብ!
             register_user(user_id, username, full_name)
             new_count = get_participant_count()
-            # ለተጠቃሚው ግልጽ ያልሆነ ስኬት መልእክት (ሽልማት አይጠቅስም)
             await update.message.reply_text(
-                "✅ ተሳትፎዎ በሚገባ ተመዝግቧል።\n"
-                "እናመሰግናለን!"
+                "✅ Your participation has been successfully recorded.\n"
+                "Thank you!"
             )
-            # ለአስተዳዳሪ ማሳወቂያ (ሽልማቱን ጨምሮ)
             await notify_admin(context, user_id, username, full_name, new_count, max_limit)
         else:
             await update.message.reply_text(
-                "❌ ይቅርታ፣ M/s Trading private channel አልተቀላቀሉም።\n"
-                "እባክዎ ለቀጣይ giveaway official ቻናላችን ላይ የተገለፀውን መስፈርት በሟሟላት ዝግጁ ይሁኑ 🔥።"
+                "❌ Sorry, your eligibility could not be confirmed.\n"
+                "Please ensure you have joined the required channel and try again."
             )
     except Exception as e:
         error_message = str(e)
         logger.error(f"Membership check error for {user_id}: {error_message}")
         if "Chat not found" in error_message or "USER_ID_INVALID" in error_message:
             await update.message.reply_text(
-                "⚠️ ቴክኒካል ችግር ተፈጥሯል። እባክዎ ቆይተው እንደገና ይሞክሩ ወይም ድጋፍ ያግኙ።"
+                "⚠️ A technical issue occurred. Please try again later or contact support."
             )
             if ADMIN_CHAT_ID:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
-                    text=f"⚠️ የቻናል ማረጋገጫ ስህተት\nUser: {user_id}\nError: {error_message[:200]}"
+                    text=f"⚠️ Channel verification error\nUser: {user_id}\nError: {error_message[:200]}"
                 )
         else:
             await update.message.reply_text(
-                "❌ ያልተጠበቀ ስህተት ተፈጥሯል። እባክዎ ቆይተው እንደገና ይሞክሩ።"
+                "❌ An unexpected error occurred. Please try again later."
             )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """የአሁኑን የተሳትፎ ሁኔታ ለማሳየት (ለማንኛውም ተጠቃሚ)"""
     count = get_participant_count()
     max_limit = get_max_limit()
     remaining = max_limit - count
     await update.message.reply_text(
-        f"📊 **የተሳትፎ ሁኔታ**\n\n"
-        f"👥 የተመዘገቡት ቁጥር: `{count}`\n"
-        f"🎯 ከፍተኛ ገደብ: `{max_limit}`\n"
-        f"✨ የቀሩ ቦታዎች: `{remaining}`",
+        f"📊 **Participation Status**\n\n"
+        f"👥 Registered participants: `{count}`\n"
+        f"🎯 Maximum limit: `{max_limit}`\n"
+        f"✨ Slots remaining: `{remaining}`",
         parse_mode="Markdown"
     )
 
 async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """የተመዘገቡ ተሳታፊዎችን ዝርዝር ለማሳየት (አስተዳዳሪ ብቻ)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ ይህ ትዕዛዝ የማይገኝ ነው።")
+        await update.message.reply_text("⛔ Command not found.")
         return
     participants = get_all_participants()
     if not participants:
-        await update.message.reply_text("📭 እስካሁን ምንም ተሳታፊ አልተመዘገበም።")
+        await update.message.reply_text("📭 No participants have registered yet.")
         return
-    message = "📋 **የተመዘገቡ ተሳታፊዎች**\n\n"
+    message = "📋 **Registered Participants**\n\n"
     for idx, (uid, uname, fname, reg_time) in enumerate(participants, 1):
         reg_time_str = reg_time.split('.')[0]
         message += (
             f"**{idx}.** {fname}\n"
             f"   🆔 `{uid}`\n"
-            f"   📛 @{uname if uname else 'የለም'}\n"
+            f"   📛 @{uname if uname else 'None'}\n"
             f"   🕒 {reg_time_str}\n\n"
         )
     await update.message.reply_text(message, parse_mode="Markdown")
 
 async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """የከፍተኛ ተሳታፊዎችን ገደብ ለማስቀመጥ (አስተዳዳሪ ብቻ)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ ይህ ትዕዛዝ የማይገኝ ነው።")
+        await update.message.reply_text("⛔ Command not found.")
         return
     try:
         new_limit = int(context.args[0])
@@ -236,63 +225,60 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_count = get_participant_count()
         if new_limit < current_count:
             await update.message.reply_text(
-                f"⚠️ አዲሱ ገደብ (`{new_limit}`) ከአሁኑ ተሳታፊዎች ቁጥር (`{current_count}`) ያነሰ ነው።\n"
-                f"ከፈለጉ በመጀመሪያ `/reset` በማድረግ ዝርዝሩን ያጥፉ።"
+                f"⚠️ The new limit (`{new_limit}`) is less than the current participant count (`{current_count}`).\n"
+                f"If you wish to proceed, first use `/reset` to clear the list."
             )
             return
         set_max_limit(new_limit)
-        await update.message.reply_text(f"✅ ከፍተኛ ተሳታፊዎች ገደብ በሚገባ ተቀይሯል። አዲሱ ገደብ: `{new_limit}`", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Maximum participant limit has been updated. New limit: `{new_limit}`", parse_mode="Markdown")
     except (IndexError, ValueError):
-        await update.message.reply_text("❗ እባክዎ ትክክለኛ ቁጥር ያስገቡ። ለምሳሌ: `/setlimit 10`")
+        await update.message.reply_text("❗ Please provide a valid number. Example: `/setlimit 10`")
 
 async def get_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """አሁን ያለውን ገደብ ለማሳየት"""
     max_limit = get_max_limit()
-    await update.message.reply_text(f"📏 አሁን ያለው ከፍተኛ ተሳታፊዎች ቁጥር: `{max_limit}`", parse_mode="Markdown")
+    await update.message.reply_text(f"📏 Current maximum participant limit: `{max_limit}`", parse_mode="Markdown")
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ሁሉንም ተሳታፊዎች ለማጥፋት (አስተዳዳሪ ብቻ)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ ይህ ትዕዛዝ የማይገኝ ነው።")
+        await update.message.reply_text("⛔ Command not found.")
         return
     reset_participants()
-    await update.message.reply_text("🗑️ ሁሉም ተሳታፊዎች በይፋ ተወግደዋል። ቆጣሪው ወደ ዜሮ ተመልሷል።")
+    await update.message.reply_text("🗑️ All participants have been cleared. The counter has been reset to zero.")
 
 async def test_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """የቻናል መታወቂያ ለመፈተሽ (አስተዳዳሪ ብቻ)"""
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ ይህ ትዕዛዝ የማይገኝ ነው።")
+        await update.message.reply_text("⛔ Command not found.")
         return
     try:
         chat = await context.bot.get_chat(chat_id=CHANNEL_ID)
         await update.message.reply_text(
-            f"✅ ቻናሉ ተገኝቷል!\n"
-            f"📛 ርዕስ: `{chat.title}`\n"
-            f"🆔 መታወቂያ: `{chat.id}`\n"
-            f"🔒 የግል ነው? `{'አዎ' if chat.username is None else 'አይ'}`",
+            f"✅ Channel found!\n"
+            f"📛 Title: `{chat.title}`\n"
+            f"🆔 ID: `{chat.id}`\n"
+            f"🔒 Private: `{'Yes' if chat.username is None else 'No'}`",
             parse_mode="Markdown"
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ ቻናሉ አልተገኘም። ስህተት: `{e}`", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Channel not found. Error: `{e}`", parse_mode="Markdown")
 
-# ================== ቦቱን ማስነሳት ==================
+# ================== START BOT ==================
 def main():
     if not TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN አልተዋቀረም!")
+        logger.error("TELEGRAM_BOT_TOKEN not set!")
         return
     if not CHANNEL_ID:
-        logger.error("CHANNEL_ID አልተዋቀረም!")
+        logger.error("CHANNEL_ID not set!")
         return
 
     init_db()
     app = Application.builder().token(TOKEN).build()
     
-    # ለሁሉም ተጠቃሚ የሚገኙ ትዕዛዞች
+    # Public commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("getlimit", get_limit))
     
-    # ለአስተዳዳሪ ብቻ የሚገኙ ትዕዛዞች (እነዚህ ለሌሎች እንደሌሉ ይታያሉ)
+    # Admin-only commands (hidden from regular users)
     app.add_handler(CommandHandler("list", list_participants))
     app.add_handler(CommandHandler("setlimit", set_limit))
     app.add_handler(CommandHandler("reset", reset))
