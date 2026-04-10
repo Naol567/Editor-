@@ -1,4 +1,4 @@
 *.pyc
 __pycache__/
-giveaway.db
+*.db
 .env
