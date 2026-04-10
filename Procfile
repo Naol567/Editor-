@@ -1,1 +1,1 @@
-worker: python giveaway_bot.py
+worker: python ms_trading_bot.py
